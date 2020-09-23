@@ -5,6 +5,7 @@
 
 
 import asyncio
+import os
 import sys
 
 from . import utils
@@ -24,47 +25,46 @@ class StreamReader(object):
 
 
 class WSL(object):
-    def __init__(self, root_pwd=None):
-        self._root_pwd = root_pwd
+    wsl_path = "C:\Windows\\system32\\wsl.exe"
 
-    async def _run_shell_cmd(self, cmdline, root=False, write_to_stdout=False):
+    def __init__(self, password=None, distribution=None):
+        self._password = password
+        self._distribution = distribution
+
+    @staticmethod
+    def check():
+        return os.path.exists(WSL.wsl_path)
+
+    async def _run_shell_cmd(
+        self, cmdline, root=False, env=None, write_to_stdout=False
+    ):
         if root:
-            if not self._root_pwd:
-                raise RuntimeError("root password not specified")
-            cmdline = "echo '%s' ^| sudo -S %s" % (self._root_pwd, cmdline)
-        cmdline = "C:\Windows\\system32\\wsl.exe " + cmdline
-        if write_to_stdout:
-            print("$ " + cmdline)
-        proc = await asyncio.create_subprocess_shell(
-            cmdline, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        tasks = [None, None]
-        stdout = stderr = ""
-        while proc.returncode is None:
-            if tasks[0] is None:
-                tasks[0] = asyncio.ensure_future(proc.stdout.readline())
-            if tasks[1] is None:
-                tasks[1] = asyncio.ensure_future(proc.stderr.readline())
-            done_tasks, _ = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
+            if not self._password:
+                raise RuntimeError("Password not specified")
+            env_params = ""
+            if env:
+                env_params = "-E"
+            cmdline = "echo '%s' ^| sudo -S %s %s" % (
+                self._password,
+                env_params,
+                cmdline,
             )
-            for task in done_tasks:
-                line = task.result().decode().replace("\x00", "")
-                if task == tasks[0]:
-                    if write_to_stdout:
-                        sys.stdout.write(line)
-                    stdout += line
-                    tasks[0] = None
-                else:
-                    if write_to_stdout:
-                        sys.stderr.write(line)
-                    stderr += line
-                    tasks[1] = None
-        return proc.returncode, stdout, stderr
 
-    async def run_shell_cmd(self, cmdline, root=False, write_to_stdout=False):
+        wsl_params = " "
+        if self._distribution:
+            wsl_params += " -d %s " % self._distribution
+        cmdline = self.__class__.wsl_path + wsl_params + cmdline
+        if env:
+            env["WSLENV"] = ":".join(env.keys())
+        return await utils.run_command(cmdline, env, write_to_stdout)
+
+    async def run_shell_cmd(self, cmdline, root=False, env=None, write_to_stdout=False):
+        if "\n" in cmdline:
+            cmdline = """sh -c 'echo "%s" ^| sh' """ % cmdline.replace(
+                "\\", "\\\\"
+            ).replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n")
         return_code, stdout, stderr = await self._run_shell_cmd(
-            cmdline, root, write_to_stdout
+            cmdline, root, env, write_to_stdout
         )
         if return_code:
             raise RuntimeError(
