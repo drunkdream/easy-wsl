@@ -15,6 +15,7 @@ import shutil
 import urllib.request
 
 import win32com.client
+import win32gui
 
 
 logger = logging.getLogger("easywsl")
@@ -121,38 +122,32 @@ async def run_command(cmdline, env=None, write_to_stdout=False):
         if tasks[1] is None:
             tasks[1] = asyncio.ensure_future(proc.stderr.read(8192))
         done_tasks, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
         for task in done_tasks:
-            for line in task.result().splitlines():
-                if line.startswith(b"\x00"):
-                    line = line[1:]
+            result = task.result()
+            for encoding in ("utf8", "gbk", "utf16"):
+                try:
+                    result = result.decode(encoding)
+                except UnicodeDecodeError:
+                    pass
+                else:
+                    result = result.replace('\x00', '')
+                    break
+            else:
+                raise RuntimeError("Unknown encoding: %r" % result)
+
+            for line in result.splitlines():
                 if not line:
                     continue
-
-                for encoding in ("utf8", "gbk"):
-                    try:
-                        line = line.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
-                        pass
-                    else:
-                        line = line.replace("\x00", "")
-                else:
-                    line = b"\xff\xfe" + line
-                    if line.endswith(b"\n"):
-                        line += b"\x00"
-                    try:
-                        line = line.decode("utf16")
-                    except UnicodeDecodeError:
-                        raise RuntimeError("Unknown encoding: %r" % line)
 
                 if task == tasks[0]:
                     if write_to_stdout:
                         sys.stdout.write(line + "\n")
-                    stdout += line
+                    stdout += line + "\n"
                 else:
                     if write_to_stdout:
                         sys.stderr.write("\x1b[1;31m%s\x1b[0;0m\n" % line)
-                    stderr += line
+                    stderr += line + "\n"
 
             if task == tasks[0]:
                 tasks[0] = None
@@ -234,20 +229,6 @@ def download(url, save_path):
             sys.stdout.write("\n")
 
 
-async def get_wsl_list():
-    cmdline = "wslconfig /l"
-    returncode, stdout, stderr = await run_command(cmdline)
-    if returncode:
-        raise RuntimeError("Get wsl list failed: %s" % stderr)
-    wsl_list = []
-    for line in stdout.replace("\r", "").splitlines()[1:]:
-        if " (" in line and line.endswith(")"):
-            wsl_list.append({"name": line.split(" (")[0], "default": True})
-        else:
-            wsl_list.append({"name": line, "default": False})
-    return wsl_list
-
-
 def enable_ansi_code():
     result = ctypes.windll.kernel32.SetConsoleMode(
         ctypes.windll.kernel32.GetStdHandle(-11), 7
@@ -297,3 +278,32 @@ def install_ttf(ttf_path):
         r'reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts" /v "FontName (TrueType)" /t REG_SZ /d "%s" /f'
         % os.path.basename(ttf_path)
     )
+
+
+def get_installed_fonts():
+    def callback(font, tm, fonttype, names):
+        names.append(font.lfFaceName)
+        return True
+
+    fontnames = []
+    hdc = win32gui.GetDC(None)
+    win32gui.EnumFontFamilies(hdc, None, callback, fontnames)
+    win32gui.ReleaseDC(hdc, None)
+    return fontnames
+
+
+def reboot():
+    while True:
+        c = input("Reboot system now? Y/N ")
+        c = c.upper()
+        if c not in ("Y", "N"):
+            continue
+        elif c == "N":
+            print("[+] You need reboot manually, and run this command again")
+            return 0
+        else:
+            print(
+                "[+] System will reboot in 10 seconds, you should run this command again after reboot"
+            )
+            sync_run_command("shutdown -r -t 10", True)
+            return 0
