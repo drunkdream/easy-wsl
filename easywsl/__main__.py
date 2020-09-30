@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import base64
 import ctypes
+import json
 import logging
 import os
 import platform
@@ -50,6 +51,52 @@ def system(cmdline, workdir=None):
     return result
 
 
+async def get_wsl_list():
+    wsl_list = []
+    sysinfo = utils.get_system_info()
+    if sysinfo["Release"] >= "2004":
+        cmdline = "wsl -l -v"
+        returncode, stdout, stderr = await utils.run_command(cmdline)
+        if returncode:
+            raise RuntimeError("Get wsl list failed: %s" % stderr)
+
+        for line in stdout.replace("\r", "").splitlines()[1:]:
+            items = line.strip().split()
+            if len(items) < 3:
+                continue
+            default = False
+            version = 1
+            if items[0] == "*":
+                default = True
+                name = items[1]
+                version = int(items[3])
+            else:
+                name = items[0]
+                version = int(items[2])
+            wsl_list.append({"name": name, "default": default, "version": version})
+    else:
+        cmdline = "wslconfig /l"
+        returncode, stdout, stderr = await utils.run_command(cmdline)
+        if returncode:
+            raise RuntimeError("Get wsl list failed: %s" % stderr)
+
+        for line in stdout.replace("\r", "").splitlines()[1:]:
+            if " (" in line and line.endswith(")"):
+                wsl_list.append(
+                    {"name": line.split(" (")[0], "default": True, "version": 1}
+                )
+            else:
+                wsl_list.append({"name": line, "default": False, "version": 1})
+    return wsl_list
+
+
+def get_current_wsl_dist():
+    wsl_list = utils.run_coroutine(get_wsl_list())
+    for dist in wsl_list:
+        if dist["default"]:
+            return dist["name"]
+
+
 def show_wsl_info(args):
     sysinfo = utils.get_system_info()
     print(
@@ -60,12 +107,16 @@ def show_wsl_info(args):
         print("WSL not enabled")
         return
 
-    wsl_list = utils.run_coroutine(utils.get_wsl_list())
-    print("\x1b[1;90mLinux distribution installed:\x1b[0;0m")
+    wsl_list = utils.run_coroutine(get_wsl_list())
+    print("\x1b[1;90mWSL distribution installed:\x1b[0;0m")
     for it in wsl_list:
         print(
-            "%s\x1b[1;92m%s\x1b[0;0m\t"
-            % (" \x1b[1;31m=>\x1b[0;0m " if it["default"] else "    ", it["name"])
+            "%s\x1b[1;92m%s\x1b[1;90m(WSL%d)\x1b[0;0m\t"
+            % (
+                " \x1b[1;31m=>\x1b[0;0m " if it["default"] else "    ",
+                it["name"],
+                it["version"],
+            )
         )
 
 
@@ -81,26 +132,14 @@ def enable_wsl():
         return -1
 
     print("[+] Enable WSL success, system needs reboot")
-    while True:
-        c = input("Reboot system now? Y/N ")
-        if c not in ("Y", "N"):
-            continue
-        elif c == "N":
-            print("[+] You need reboot manually, and run this command again")
-            return 0
-        else:
-            print(
-                "[+] System will reboot in 10 seconds, you should run this command again after reboot"
-            )
-            utils.sync_run_command("shutdown -r -t 10", True)
-            return 0
+    utils.reboot()
 
 
-def install_linux(name, install_path):
+def install_wsl_dist(name, install_path):
     image_url = WSL_IMAGES[platform.machine().lower()].get(name)
     if not image_url:
         raise RuntimeError("Linux image %s not found" % name)
-    print("[+] Downloading %s image %s" % (name, image_url))
+    print("[+] Downloading %s image from %s" % (name, image_url))
     save_path = tempfile.mkstemp(".img")[1]
     utils.download(image_url, save_path)
     print("[+] Image file saved to %s" % save_path)
@@ -151,10 +190,10 @@ def install_linux(name, install_path):
 
 
 def uninstall_wsl(args):
-    wsl_list = utils.run_coroutine(utils.get_wsl_list())
+    wsl_list = utils.run_coroutine(get_wsl_list())
     wsl_list = [it["name"].lower() for it in wsl_list]
     if args.distribution.lower() not in wsl_list:
-        raise RuntimeError("Linux %s not installed" % args.distribution)
+        raise RuntimeError("WSL distribution %s not installed" % args.distribution)
     print("[+] Uninstalling %s" % args.distribution)
     cmdline = 'wslconfig /u "%s"' % args.distribution
     os.system(cmdline)
@@ -168,18 +207,82 @@ def install_wsl(args):
         return enable_wsl()
     else:
         install_path = args.install_path or r"C:\Linux"
-        install_linux(args.distribution, install_path)
+        install_wsl_dist(args.distribution, install_path)
 
 
 def set_default_distribution(args):
-    wsl_list = utils.run_coroutine(utils.get_wsl_list())
+    wsl_list = utils.run_coroutine(get_wsl_list())
     wsl_list = [it["name"].lower() for it in wsl_list]
     if args.distribution.lower() not in wsl_list:
-        raise RuntimeError("Linux %s not installed" % args.distribution)
+        raise RuntimeError("WSL distribution %s not installed" % args.distribution)
     print("[+] Set default distribution as %s" % args.distribution)
     cmdline = 'wslconfig /s "%s"' % args.distribution
     os.system(cmdline)
     print("[+] Set default distribution as %s completed" % args.distribution)
+
+
+def update_wsl_kernel():
+    url = "https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
+    save_path = os.path.join(
+        tempfile.mkdtemp(), urllib.parse.unquote(url.split("/")[-1])
+    )
+    utils.download(url, save_path)
+    system(save_path)
+
+
+def enable_virtual_machine():
+    cmdline = (
+        "dism.exe /online /get-featureinfo /featurename:VirtualMachinePlatform /english"
+    )
+    _, stdout, _ = utils.sync_run_command(cmdline)
+    vm_enabled = False
+    for line in stdout.splitlines():
+        line = line.strip()
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if key.strip() == "State":
+            if value.strip() == "Enabled":
+                vm_enabled = True
+            break
+    else:
+        raise RuntimeError("Get vm feature info failed: %s" % stdout)
+    if not vm_enabled:
+        print("[+] Enable feature VirtualMachinePlatform")
+        cmdline = "dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart"
+        utils.sync_run_command(cmdline, True)
+        print("[+] Enable VirtualMachinePlatform success, system needs reboot")
+        utils.reboot()
+
+
+def set_default_version(args):
+    if args.version == 2:
+        enable_virtual_machine()
+
+    cmdline = "wsl --set-default-version %d" % args.version
+    _, stdout, stderr = utils.sync_run_command(cmdline, True)
+    if "wsl2kernel" in stderr:
+        print("[+] Update WSL kernel")
+        update_wsl_kernel()
+        utils.sync_run_command(cmdline, True)
+
+
+def set_dist_version(args):
+    if args.version == 2:
+        enable_virtual_machine()
+    dist = args.distribution
+    if not dist:
+        dist = get_current_wsl_dist()
+        if not dist:
+            raise RuntimeError("No wsl distribution found")
+    else:
+        wsl_list = utils.run_coroutine(get_wsl_list())
+        wsl_list = [it["name"].lower() for it in wsl_list]
+        if dist.lower() not in wsl_list:
+            raise RuntimeError("WSL distributon %s not found" % dist)
+
+    cmdline = "wsl --set-version %s %d" % (dist, args.version)
+    _, stdout, stderr = utils.sync_run_command(cmdline, True)
 
 
 def forward_ports(args):
@@ -203,10 +306,10 @@ def forward_ports(args):
 
 
 def install_zsh(args):
-    wsl_list = utils.run_coroutine(utils.get_wsl_list())
+    wsl_list = utils.run_coroutine(get_wsl_list())
     wsl_list = [it["name"].lower() for it in wsl_list]
     if args.distribution and args.distribution.lower() not in wsl_list:
-        raise RuntimeError("Linux %s not installed" % args.distribution)
+        raise RuntimeError("WSL distribution %s not installed" % args.distribution)
 
     theme = args.theme or "agnoster"
     owsl = wsl.WSL(args.password, args.distribution)
@@ -235,6 +338,7 @@ cat ~/.zshrc
     save_path = os.path.join(
         tempfile.mkdtemp(), urllib.parse.unquote(font_url.split("/")[-1])
     )
+    print("[+] Download %s" % font_url)
     utils.download(font_url, save_path)
     utils.install_ttf(save_path)
 
@@ -243,14 +347,29 @@ cat ~/.zshrc
         utils.run_coroutine(owsl.run_shell_cmd(cmdline))
 
 
+def select_font():
+    total_fonts = utils.get_installed_fonts()
+    preferred_fonts = [
+        "Noto Mono for Powerline",
+        "NovaMono for Powerline",
+        "Source Code Pro for Powerline",
+        "Ubuntu Mono derivative Powerline",
+        "Consolas",
+    ]
+    for font in preferred_fonts:
+        if font in total_fonts:
+            return font
+    return None
+
+
 def install_wsl_terminal(wsl, env, install_path, default_shell):
     cmdline = """
 $(which apt || which yum) update
 $(which apt || which yum) install -y p7zip-full
 """
-    cmdline = """bash -c "$(echo -e '%s')" """ % cmdline.replace(
-        "\\", "\\\\"
-    ).replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n")
+    cmdline = """bash -c "$(echo -e '%s')" """ % cmdline.replace("\\", "\\\\").replace(
+        "'", "\\'"
+    ).replace('"', '\\"').replace("\n", "\\n")
 
     utils.run_coroutine(wsl.run_shell_cmd(cmdline, True, env, True))
     wsl_install_path = utils.windows_path_2_wsl_path(install_path)
@@ -264,52 +383,133 @@ $(which apt || which yum) install -y p7zip-full
         % {"install_path": os.path.join(install_path, "wsl-terminal")}
     )
     utils.sync_run_command(cmdline, write_to_stdout=True)
-    with open(
-        os.path.join(install_path, "wsl-terminal", "etc", "minttyrc"), 'w'
-    ) as fp:
+    font = select_font() or ""
+    with open(os.path.join(install_path, "wsl-terminal", "etc", "minttyrc"), "w") as fp:
         fp.write(
             """Emojis=openmoji
 ThemeFile=base16-solarized-dark.minttyrc
-Font=Noto Mono for Powerline
+Font=%s
 FontHeight=12"""
+            % font
         )
-    terminal_conf = os.path.join(install_path, "wsl-terminal", "etc", "wsl-terminal.conf")
+    terminal_conf = os.path.join(
+        install_path, "wsl-terminal", "etc", "wsl-terminal.conf"
+    )
     with open(terminal_conf) as fp:
         text = fp.read()
-    conf_text = ''
+    conf_text = ""
     for line in text.splitlines():
-        if not line or line[0] == ';':
-            conf_text += line + '\n'
+        if not line or line[0] == ";":
+            conf_text += line + "\n"
             continue
-        if line.startswith('shell='):
+        if line.startswith("shell="):
             line = line[:6] + default_shell
-        conf_text += line + '\n'
-    with open(terminal_conf, 'w') as fp:
+        conf_text += line + "\n"
+    with open(terminal_conf, "w") as fp:
         fp.write(conf_text)
     print("Install wsl-terminal success")
 
 
+def install_windows_terminal(background_image=None):
+    sysinfo = utils.get_system_info()
+    if sysinfo["Release"] < "1903":
+        raise RuntimeError("Windows terminal only support 1903 and later")
+    latest_release = utils.get_github_latest_release("microsoft/terminal")
+    for it in latest_release["assets"]:
+        if not it["name"].endswith(".msixbundle"):
+            continue
+        url = it["browser_download_url"]
+        filename = url.split("/")[-1]
+        save_path = os.path.abspath(filename)
+        utils.download(url, save_path)
+        cmdline = 'powershell Add-AppxPackage "%s"' % save_path
+        utils.sync_run_command(cmdline, write_to_stdout=True)
+        os.remove(save_path)
+        settings_path = os.path.join(
+            os.environ["USERPROFILE"],
+            "AppData",
+            "Local",
+            "Packages",
+            filename.split(".")[0],
+            "LocalState",
+            "settings.json",
+        )
+        font = select_font() or ""
+        with open(settings_path) as fp:
+            text = fp.read()
+        settings = json.loads(text)
+        profiles = settings["profiles"]["list"]
+        default_profile = None
+        for it in profiles:
+            if it["hidden"]:
+                continue
+            if it["source"] == "Windows.Terminal.Wsl":
+                default_profile = it["guid"]
+                break
+
+        conf_text = ""
+        for line in text.splitlines():
+            if "Put settings here that you want to apply to all profiles" in line:
+                conf_text += line + "\n"
+                conf_text += """
+            "fontFace": "%s",
+            "fontSize": 12,
+            "colorScheme": "Solarized Dark",
+			"backgroundImageOpacity": 0.2,
+			"backgroundImage": "%s"
+""" % (
+                    font,
+                    background_image or "",
+                )
+            elif "defaultProfile" in line:
+                if default_profile:
+                    conf_text += '    "defaultProfile": "{%s}",\n' % default_profile
+                else:
+                    conf_text += line + "\n"
+            elif '"schemes": []' in line:
+                conf_text += """    "schemes": [
+        {
+            "name": "Solarized Dark",
+            "black": "#002831",
+            "red": "#d11c24",
+            "green": "#738a05",
+            "yellow": "#a57706",
+            "blue": "#2176c7",
+            "purple": "#c61c6f",
+            "cyan": "#259286",
+            "white": "#eae3cb",
+            "brightBlack": "#475b62",
+            "brightRed": "#bd3613",
+            "brightGreen": "#475b62",
+            "brightYellow": "#536870",
+            "brightBlue": "#708284",
+            "brightPurple": "#5956ba",
+            "brightCyan": "#819090",
+            "brightWhite": "#fcf4dc",
+            "background": "#001e27",
+            "foreground": "#708284"
+        }
+    ],\n"""
+            else:
+                conf_text += line + "\n"
+        with open(settings_path, "w") as fp:
+            fp.write(conf_text)
+        print("Install windows terminal success")
+        return
+    else:
+        raise RuntimeError("Get windows terminal latest release failed")
+
+
 def install_terminal(args):
-    args.install_path = os.path.abspath(args.install_path)
-    if not os.path.isdir(args.install_path):
-        raise RuntimeError("Install path %s not found" % args.install_path)
     owsl = wsl.WSL(args.password)
     env = utils.get_env(["http_proxy", "https_proxy"])
     if args.name == "wsl-terminal":
+        args.install_path = os.path.abspath(os.path.expandvars(args.install_path))
+        if not os.path.isdir(args.install_path):
+            raise RuntimeError("Install path %s not found" % args.install_path)
         install_wsl_terminal(owsl, env, args.install_path, args.default_shell)
     elif args.name == "windows-terminal":
-        sysinfo = utils.get_system_info()
-        if sysinfo["Release"] < "1903":
-            raise RuntimeError("Windows Terminal only support 1903 and later")
-        latest_release = utils.get_github_latest_release("microsoft/terminal")
-        for it in latest_release["assets"]:
-            if not it["name"].endswith(".msixbundle"):
-                continue
-            url = it["browser_download_url"]
-            save_path = tempfile.mkstemp(".msixbundle")[1]
-            utils.download(url, save_path)
-            cmdline = 'powershell Add-AppxPackage "%s"' % save_path
-            utils.sync_run_command(cmdline, write_to_stdout=True)
+        install_windows_terminal()
     else:
         raise NotImplementedError(args.name)
 
@@ -353,14 +553,43 @@ def main():
     )
     parser_uninstall.set_defaults(func=uninstall_wsl)
 
-    parser_setdefault = subparsers.add_parser("setdefault")
-    parser_setdefault.add_argument(
+    parser_set_default = subparsers.add_parser("set-default")
+    parser_set_default.add_argument(
         "-d",
         "--distribution",
         help="linux distribution name",
         required=True,
     )
-    parser_setdefault.set_defaults(func=set_default_distribution)
+    parser_set_default.set_defaults(func=set_default_distribution)
+
+    parser_set_default_version = subparsers.add_parser("set-default-version")
+    parser_set_default_version.add_argument(
+        "-v",
+        "--version",
+        help="default wsl version, default is 1",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        required=True,
+    )
+    parser_set_default_version.set_defaults(func=set_default_version)
+
+    parser_set_dist_version = subparsers.add_parser("set-dist-version")
+    parser_set_dist_version.add_argument(
+        "-d",
+        "--distribution",
+        help="linux distribution name, default is current distribution",
+    )
+    parser_set_dist_version.add_argument(
+        "-v",
+        "--version",
+        help="default wsl version, default is 1",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        required=True,
+    )
+    parser_set_dist_version.set_defaults(func=set_dist_version)
 
     parser_install_zsh = subparsers.add_parser("install-zsh")
     parser_install_zsh.add_argument(
@@ -394,7 +623,7 @@ def main():
         "-p", "--password", help="current user password"
     )
     parser_install_terminal.add_argument(
-        "--install-path", help="the path to install terminal", default="D:\\"
+        "--install-path", help="the path to install terminal", default="%APPDATA%"
     )
     parser_install_terminal.add_argument(
         "--default-shell", help="default terminal shell", default="/bin/bash"
