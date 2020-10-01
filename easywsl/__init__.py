@@ -1,4 +1,6 @@
 # -*- coding: UTF-8 -*-
 
-'''Make wsl2 more easier
-'''
+"""Easy to deploy WSL
+"""
+
+VERSION = "0.1.0"
