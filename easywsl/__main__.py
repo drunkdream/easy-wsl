@@ -58,6 +58,8 @@ async def get_wsl_list():
         cmdline = "wsl -l -v"
         returncode, stdout, stderr = await utils.run_command(cmdline)
         if returncode:
+            if not stderr:
+                return wsl_list
             raise RuntimeError("Get wsl list failed: %s" % stderr)
 
         for line in stdout.replace("\r", "").splitlines()[1:]:
