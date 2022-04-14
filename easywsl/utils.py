@@ -22,6 +22,7 @@ logger = logging.getLogger("easywsl")
 
 
 version_map = {
+    "19044": "2109",
     "19043": "2104",
     "19041": "2004",
     "18363": "1909",
@@ -34,7 +35,7 @@ version_map = {
 def get_windows_release(build_num):
     if build_num in version_map:
         return version_map[build_num]
-    return None
+    raise NotImplementedError(build_num)
 
 
 def get_system_info():
