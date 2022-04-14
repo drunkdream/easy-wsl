@@ -5,7 +5,6 @@
 
 import argparse
 import asyncio
-import base64
 import ctypes
 import json
 import logging
@@ -13,7 +12,6 @@ import os
 import platform
 import sys
 import tempfile
-import time
 import shutil
 import urllib.parse
 import zipfile
@@ -99,13 +97,19 @@ def get_current_wsl_dist():
             return dist["name"]
 
 
+def check_wsl_enabled():
+    cmdline = "dism /english /online /get-featureinfo /featurename:Microsoft-Windows-Subsystem-Linux"
+    stdout = os.popen(cmdline).read()
+    return "State : Disabled" not in stdout
+
+
 def show_wsl_info(args):
     sysinfo = utils.get_system_info()
     print(
         "%s \x1b[1;33m%s\x1b[0;0m Version \x1b[1;36m%s\x1b[0;0m"
         % (sysinfo["Name"], sysinfo["Release"], sysinfo["Version"])
     )
-    if not wsl.WSL.check():
+    if not wsl.WSL.check() or not check_wsl_enabled():
         print("WSL not enabled")
         return
 
@@ -125,7 +129,7 @@ def show_wsl_info(args):
 def enable_wsl():
     print("[+] Enabling WSL")
     returncode, _, _ = utils.sync_run_command(
-        "dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart",
+        "dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart",
         True,
     )
 
@@ -156,7 +160,18 @@ def install_wsl_dist(name, install_path):
 
     manifest_file = os.path.join(install_path, "AppxManifest.xml")
     if not os.path.isfile(manifest_file):
-        raise RuntimeError("Invalid WSL path: %s" % install_path)
+        appx_path = None
+        for it in os.listdir(install_path):
+            if it.endswith("_x64.appx"):
+                appx_path = os.path.join(install_path, it)
+                zf = zipfile.ZipFile(appx_path, "r")
+                for fname in zf.namelist():
+                    print("[+] Extract %s" % (fname))
+                    zf.extract(fname, install_path)
+                zf.close()
+                break
+        if not os.path.isfile(manifest_file):
+            raise RuntimeError("Invalid WSL path: %s" % install_path)
     dom = minidom.parse(manifest_file)
     app_node = dom.getElementsByTagName("Application")[0]
     install_exe = app_node.getAttribute("Executable")
@@ -205,7 +220,7 @@ def uninstall_wsl(args):
 def install_wsl(args):
     if not ctypes.windll.shell32.IsUserAnAdmin():
         raise RuntimeError("Install WSL needs run as administrator")
-    if not wsl.WSL.check():
+    if not wsl.WSL.check() or not check_wsl_enabled():
         return enable_wsl()
     else:
         install_path = args.install_path or r"C:\Linux"
