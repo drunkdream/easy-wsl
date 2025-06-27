@@ -363,7 +363,7 @@ cat ~/.zshrc
 
     if args.set_default_shell:
         cmdline = "echo %s ^| chsh -s /bin/zsh" % args.password
-        utils.run_coroutine(owsl.run_shell_cmd(cmdline))
+        utils.run_coroutine(owsl.run_shell_cmd(cmdline, write_to_stdout=True))
 
 
 def select_font():

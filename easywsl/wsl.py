@@ -56,7 +56,8 @@ class WSL(object):
         cmdline = self.__class__.wsl_path + wsl_params + cmdline
         if env:
             env["WSLENV"] = ":".join(env.keys())
-        return await utils.run_command(cmdline, env, write_to_stdout)
+
+        return await utils.run_command(cmdline, env or None, write_to_stdout)
 
     async def run_shell_cmd(self, cmdline, root=False, env=None, write_to_stdout=False):
         if "\n" in cmdline:

@@ -22,6 +22,7 @@ logger = logging.getLogger("easywsl")
 
 
 version_map = {
+    "20348": "21H2",
     "19045": "22H2",
     "19044": "21H2",
     "19043": "21H1",
