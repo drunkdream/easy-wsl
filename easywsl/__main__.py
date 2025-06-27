@@ -26,6 +26,8 @@ ERROR_SUCCESS_REBOOT_REQUIRED = 3010
 
 WSL_IMAGES = {
     "amd64": {
+        "Ubuntu-24.04": "https://wslstorestorage.blob.core.windows.net/wslblob/Ubuntu2404-240425.AppxBundle",
+        "Ubuntu-22.04": "https://aka.ms/wslubuntu2204",
         "Ubuntu-20.04": "https://aka.ms/wslubuntu2004",
         "Ubuntu-18.04": "https://aka.ms/wsl-ubuntu-1804",
         "Ubuntu-16.04": "https://aka.ms/wsl-ubuntu-1604",
